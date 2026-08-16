@@ -6,22 +6,28 @@ from agents.agent import ResearchAgent
 class ResearchSwarm:
     def __init__(self):
 
-        # Stronger model for primary web research
+        # Primary researcher
         self.researcher = ResearchAgent(
             model="openai/gpt-oss-20b",
             max_completion_tokens=400,
         )
 
-        # Faster/lighter model for parallel specialist workers
+        # Fast specialist workers
         self.specialist = ResearchAgent(
+            model="llama-3.1-8b-instant",
+            max_completion_tokens=350,
+        )
+
+        # Writer
+        self.writer = ResearchAgent(
             model="llama-3.1-8b-instant",
             max_completion_tokens=500,
         )
 
-        # Lighter model for final synthesis
-        self.editor = ResearchAgent(
+        # Critic
+        self.critic = ResearchAgent(
             model="llama-3.1-8b-instant",
-            max_completion_tokens=500,
+            max_completion_tokens=350,
         )
 
     async def run_parallel_agents(self, research, tasks):
@@ -50,15 +56,172 @@ Return concise findings in bullet points.
                 False,
             )
 
+        # Run specialist agents concurrently
         results = await asyncio.gather(
             *(run_agent(task) for task in tasks)
         )
 
         return results
 
+    def create_draft(self, research, specialist_results):
+
+        combined = "\n\n".join(
+            f"--- Specialist {i + 1} ---\n{result}"
+            for i, result in enumerate(specialist_results)
+        )
+
+        draft = self.writer.run(
+            f"""
+You are the lead technical writer.
+
+Create a research report using ONLY the information below.
+
+PRIMARY RESEARCH:
+
+{research[:5000]}
+
+SPECIALIST ANALYSIS:
+
+{combined}
+
+Requirements:
+
+1. Use clear headings.
+2. Organize information logically.
+3. Separate confirmed facts from uncertain claims.
+4. Do not invent facts.
+5. Do not add information that is not supported by the research.
+6. Keep the report concise.
+""",
+            use_web=False,
+        )
+
+        return draft
+
+    def review_draft(self, research, draft):
+
+        review = self.critic.run(
+            f"""
+You are the Chief Research Quality Reviewer.
+
+Your job is to strictly review the draft against the original
+source research.
+
+SOURCE RESEARCH:
+
+{research[:5000]}
+
+DRAFT REPORT:
+
+{draft}
+
+Check the draft for:
+
+1. Factual contradictions.
+2. Unsupported claims.
+3. Invented statistics.
+4. Misleading conclusions.
+5. Missing important information.
+6. Poor organization.
+7. Claims that require stronger evidence.
+8. Information that cannot be supported by the source research.
+
+IMPORTANT:
+
+Return ONLY a JSON object.
+
+Do not use markdown.
+
+Do not use ```json.
+
+Do not include explanations before or after the JSON.
+
+The JSON MUST contain exactly these three fields:
+
+{{
+    "status": "PASS",
+    "critical_flaws": [],
+    "revision_notes": ""
+}}
+
+OR:
+
+{{
+    "status": "FAIL",
+    "critical_flaws": [
+        "specific problem 1",
+        "specific problem 2"
+    ],
+    "revision_notes": "Clear instructions explaining exactly what should be changed."
+}}
+
+Use PASS only when the report contains no significant unsupported
+claims, factual contradictions, or misleading conclusions.
+
+Use FAIL when there is any significant factual or evidence problem.
+
+Be extremely strict.
+""",
+            use_web=False,
+            json_mode=True,
+        )
+
+        return review
+
+    def revise_draft(self, research, draft, review):
+
+        # Convert review into readable text for the writer.
+        if isinstance(review, dict):
+            review_text = (
+                f"Status: {review.get('status', 'FAIL')}\n"
+                f"Critical flaws: "
+                f"{review.get('critical_flaws', [])}\n"
+                f"Revision notes: "
+                f"{review.get('revision_notes', '')}"
+            )
+        else:
+            review_text = str(review)
+
+        revised = self.writer.run(
+            f"""
+You are revising a research report.
+
+SOURCE RESEARCH:
+
+{research[:5000]}
+
+CURRENT DRAFT:
+
+{draft}
+
+QUALITY REVIEW:
+
+{review_text}
+
+Rewrite the report to fix every issue identified by the reviewer.
+
+Rules:
+
+1. Use only supported information.
+2. Remove unsupported claims.
+3. Clearly qualify uncertain information.
+4. Do not invent replacement facts.
+5. Keep the report concise and professional.
+6. Preserve useful information from the original draft.
+7. Do not add new claims that are not supported by the source research.
+""",
+            use_web=False,
+        )
+
+        return revised
+
     async def run(self, topic):
 
-        print("\n[1/3] Primary researcher working...")
+        print("\n[1/5] Primary researcher working...")
+
+        # ---------------------------------------------------------
+        # STEP 1: PRIMARY WEB RESEARCH
+        # ---------------------------------------------------------
 
         research = self.researcher.run(
             f"""
@@ -67,18 +230,23 @@ Research the following topic using current web sources:
 {topic}
 
 Collect:
+
 - important facts
 - recent developments
 - important companies or tools
 - relevant dates
 - useful evidence
 
-Keep the research concise.
+Keep the research concise and structured.
 """,
             use_web=True,
         )
 
-        print("[2/3] Parallel specialist agents working...")
+        print("[2/5] Parallel specialist agents working...")
+
+        # ---------------------------------------------------------
+        # STEP 2: PARALLEL SPECIALIST AGENTS
+        # ---------------------------------------------------------
 
         tasks = [
             """
@@ -86,6 +254,7 @@ Analyze this research from a technical/software engineering
 perspective.
 
 Identify:
+
 - technologies
 - tools
 - architectures
@@ -96,6 +265,7 @@ Identify:
 Analyze this research from a market and industry perspective.
 
 Identify:
+
 - companies
 - products
 - adoption trends
@@ -103,10 +273,11 @@ Identify:
 """,
 
             """
-Act as a skeptical fact-checker.
+Analyze this research as a skeptical fact-checker.
 
 Identify:
-- claims that need verification
+
+- claims requiring verification
 - possible inconsistencies
 - weak evidence
 - unsupported conclusions
@@ -118,35 +289,85 @@ Identify:
             tasks,
         )
 
-        print("[3/3] Combining specialist findings...")
+        print("[3/5] Writer creating draft...")
 
-        combined = "\n\n".join(
-            f"--- Specialist {i + 1} ---\n{result}"
-            for i, result in enumerate(specialist_results)
+        # ---------------------------------------------------------
+        # STEP 3: CREATE INITIAL DRAFT
+        # ---------------------------------------------------------
+
+        draft = self.create_draft(
+            research,
+            specialist_results,
         )
 
-        final = self.editor.run(
-            f"""
-You are the lead research editor.
+        # ---------------------------------------------------------
+        # STEP 4: QUALITY GATE
+        # ---------------------------------------------------------
 
-Original research:
+        max_revisions = 2
 
-{research[:5000]}
+        for attempt in range(max_revisions + 1):
 
-Specialist analysis:
+            print(
+                f"[4/5] Quality review "
+                f"(attempt {attempt + 1})..."
+            )
 
-{combined}
+            review = self.review_draft(
+                research,
+                draft,
+            )
 
-Create a concise final research report.
+            # Safely extract status
+            if isinstance(review, dict):
+                status = review.get("status", "FAIL")
+            else:
+                status = "FAIL"
 
-Requirements:
-- Use only information contained in the research.
-- Use the specialist findings to organize the report.
-- Clearly identify uncertainty.
-- Do not invent information.
-- Use clear headings and bullet points.
-""",
-            use_web=False,
-        )
+            # Normalize status
+            status = str(status).upper().strip()
 
-        return final
+            print(
+                f"    Review result: {status}"
+            )
+
+            # -----------------------------------------------------
+            # PASS
+            # -----------------------------------------------------
+
+            if status == "PASS":
+
+                print(
+                    "[5/5] Quality gate passed."
+                )
+
+                return draft
+
+            # -----------------------------------------------------
+            # MAXIMUM REVISIONS REACHED
+            # -----------------------------------------------------
+
+            if attempt == max_revisions:
+
+                print(
+                    "[5/5] Maximum revisions reached."
+                )
+
+                return draft
+
+            # -----------------------------------------------------
+            # FAIL → REVISION
+            # -----------------------------------------------------
+
+            print(
+                f"    Revising draft "
+                f"(revision {attempt + 1})..."
+            )
+
+            draft = self.revise_draft(
+                research,
+                draft,
+                review,
+            )
+
+        return draft

@@ -1,4 +1,5 @@
 import os
+import json
 
 from dotenv import load_dotenv
 from groq import Groq
@@ -34,7 +35,8 @@ Your job is to:
 6. Keep your output concise and structured.
 """
 
-    def run(self, task, use_web=False):
+    def run(self, task, use_web=False, json_mode=False):
+
         request = {
             "model": self.model,
             "messages": [
@@ -51,11 +53,16 @@ Your job is to:
         }
 
         # GPT-OSS supports reasoning_effort.
-        # Llama models do not support this parameter.
         if self.model.startswith("openai/gpt-oss"):
             request["reasoning_effort"] = "low"
 
-        # Enable browser search only when requested.
+        # Enable JSON response when requested.
+        if json_mode:
+            request["response_format"] = {
+                "type": "json_object"
+            }
+
+        # Enable browser search when requested.
         if use_web:
             request["tool_choice"] = "required"
             request["tools"] = [
@@ -66,4 +73,39 @@ Your job is to:
 
         response = self.client.chat.completions.create(**request)
 
-        return response.choices[0].message.content
+        content = response.choices[0].message.content
+
+        # Convert JSON string into a Python dictionary.
+        if json_mode:
+
+            try:
+                parsed = json.loads(content)
+
+                # Make sure the result is actually a dictionary.
+                if isinstance(parsed, dict):
+                    return parsed
+
+                return {
+                    "status": "FAIL",
+                    "critical_flaws": [
+                        "Critic returned JSON, but it was not an object."
+                    ],
+                    "revision_notes": (
+                        "Return a JSON object with status, "
+                        "critical_flaws and revision_notes."
+                    ),
+                }
+
+            except (json.JSONDecodeError, TypeError):
+
+                return {
+                    "status": "FAIL",
+                    "critical_flaws": [
+                        "Critic returned invalid JSON."
+                    ],
+                    "revision_notes": (
+                        "Return only a valid JSON object."
+                    ),
+                }
+
+        return content
