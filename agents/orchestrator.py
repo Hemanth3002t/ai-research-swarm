@@ -8,8 +8,15 @@ class ResearchSwarm:
 
     def __init__(self):
 
-        # Database repository
+        # =====================================================
+        # DATABASE
+        # =====================================================
+
         self.repository = ResearchRepository()
+
+        # =====================================================
+        # AI AGENTS
+        # =====================================================
 
         # Primary researcher
         self.researcher = ResearchAgent(
@@ -17,7 +24,7 @@ class ResearchSwarm:
             max_completion_tokens=400,
         )
 
-        # Fast specialist workers
+        # Specialist workers
         self.specialist = ResearchAgent(
             model="llama-3.1-8b-instant",
             max_completion_tokens=350,
@@ -39,35 +46,149 @@ class ResearchSwarm:
     # PARALLEL SPECIALIST AGENTS
     # =========================================================
 
-    async def run_parallel_agents(self, research, tasks):
+    async def run_parallel_agents(
+        self,
+        project_id,
+        research,
+        tasks,
+    ):
 
-        async def run_agent(task):
+        async def run_agent(agent_config):
+
+            task_type = agent_config["task_type"]
+            agent_name = agent_config["agent_name"]
+            assignment = agent_config["assignment"]
+
+            # -------------------------------------------------
+            # Create persistent research task
+            # -------------------------------------------------
+
+            task_id = self.repository.create_task(
+                project_id=project_id,
+                task_type=task_type,
+                description=assignment,
+                assigned_agent=agent_name,
+            )
+
+            self.repository.update_task(
+                task_id,
+                "running",
+            )
+
+            # -------------------------------------------------
+            # Create persistent agent run
+            # -------------------------------------------------
+
+            run_id = self.repository.create_agent_run(
+                project_id=project_id,
+                agent_name=agent_name,
+                task=assignment,
+                model="llama-3.1-8b-instant",
+            )
+
+            # -------------------------------------------------
+            # Build specialist prompt
+            # -------------------------------------------------
 
             prompt = f"""
+You are the {agent_name}.
+
 Here is research collected by the primary researcher:
 
 {research[:6000]}
 
 Your assignment:
 
-{task}
+{assignment}
 
-Analyze only the information provided above.
+Analyze ONLY the information provided above.
 
 Do not invent facts.
+
+Clearly identify uncertainty when the research does not
+provide enough evidence.
 
 Return concise findings in bullet points.
 """
 
-            return await asyncio.to_thread(
-                self.specialist.run,
-                prompt,
-                False,
-            )
+            try:
 
-        # Run specialist agents concurrently
+                # -------------------------------------------------
+                # Run specialist asynchronously
+                # -------------------------------------------------
+
+                result = await asyncio.to_thread(
+                    self.specialist.run,
+                    prompt,
+                    False,
+                )
+
+                # -------------------------------------------------
+                # Save successful agent run
+                # -------------------------------------------------
+
+                self.repository.complete_agent_run(
+                    run_id,
+                    result,
+                )
+
+                # -------------------------------------------------
+                # Save successful task
+                # -------------------------------------------------
+
+                self.repository.update_task(
+                    task_id,
+                    "completed",
+                    result,
+                )
+
+                return {
+                    "agent_name": agent_name,
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "result": result,
+                    "status": "completed",
+                }
+
+            except Exception as error:
+
+                # -------------------------------------------------
+                # Save failed agent run
+                # -------------------------------------------------
+
+                self.repository.fail_agent_run(
+                    run_id,
+                    error,
+                )
+
+                # -------------------------------------------------
+                # Save failed task
+                # -------------------------------------------------
+
+                self.repository.update_task(
+                    task_id,
+                    "failed",
+                    str(error),
+                )
+
+                return {
+                    "agent_name": agent_name,
+                    "task_id": task_id,
+                    "run_id": run_id,
+                    "result": "",
+                    "status": "failed",
+                    "error": str(error),
+                }
+
+        # ---------------------------------------------------------
+        # Run ALL specialist agents concurrently
+        # ---------------------------------------------------------
+
         results = await asyncio.gather(
-            *(run_agent(task) for task in tasks)
+            *(
+                run_agent(agent_config)
+                for agent_config in tasks
+            )
         )
 
         return results
@@ -76,18 +197,58 @@ Return concise findings in bullet points.
     # CREATE DRAFT
     # =========================================================
 
-    def create_draft(self, research, specialist_results):
+    def create_draft(
+        self,
+        research,
+        specialist_results,
+    ):
+
+        # Convert specialist dictionaries into readable text
+        combined_sections = []
+
+        for result in specialist_results:
+
+            agent_name = result.get(
+                "agent_name",
+                "Unknown Specialist",
+            )
+
+            status = result.get(
+                "status",
+                "unknown",
+            )
+
+            findings = result.get(
+                "result",
+                "",
+            )
+
+            combined_sections.append(
+                f"""
+--- {agent_name} ---
+
+Status: {status}
+
+Findings:
+
+{findings}
+"""
+            )
 
         combined = "\n\n".join(
-            f"--- Specialist {i + 1} ---\n{result}"
-            for i, result in enumerate(specialist_results)
+            combined_sections
         )
+
+        # ---------------------------------------------------------
+        # Writer
+        # ---------------------------------------------------------
 
         draft = self.writer.run(
             f"""
 You are the lead technical writer.
 
-Create a research report using ONLY the information below.
+Create a professional research report using ONLY the
+information below.
 
 PRIMARY RESEARCH:
 
@@ -104,7 +265,9 @@ Requirements:
 3. Separate confirmed facts from uncertain claims.
 4. Do not invent facts.
 5. Do not add information that is not supported by the research.
-6. Keep the report concise.
+6. Clearly identify claims that require verification.
+7. Keep the report concise and professional.
+8. Do not treat vendor claims as independently verified facts.
 """,
             use_web=False,
         )
@@ -115,7 +278,11 @@ Requirements:
     # REVIEW DRAFT
     # =========================================================
 
-    def review_draft(self, research, draft):
+    def review_draft(
+        self,
+        research,
+        draft,
+    ):
 
         review = self.critic.run(
             f"""
@@ -142,6 +309,7 @@ Check the draft for:
 6. Poor organization.
 7. Claims that require stronger evidence.
 8. Information that cannot be supported by the source research.
+9. Vendor claims presented as independently verified facts.
 
 IMPORTANT:
 
@@ -189,7 +357,12 @@ Be extremely strict.
     # REVISE DRAFT
     # =========================================================
 
-    def revise_draft(self, research, draft, review):
+    def revise_draft(
+        self,
+        research,
+        draft,
+        review,
+    ):
 
         if isinstance(review, dict):
 
@@ -232,6 +405,7 @@ Rules:
 5. Keep the report concise and professional.
 6. Preserve useful information from the original draft.
 7. Do not add new claims that are not supported by the source research.
+8. Do not present vendor claims as independently verified facts.
 """,
             use_web=False,
         )
@@ -242,21 +416,26 @@ Rules:
     # MAIN SWARM
     # =========================================================
 
-    async def run(self, topic):
+    async def run(
+        self,
+        topic,
+    ):
 
-        # -----------------------------------------------------
+        # =====================================================
         # CREATE PROJECT
-        # -----------------------------------------------------
+        # =====================================================
 
-        project_id = self.repository.create_project(topic)
+        project_id = self.repository.create_project(
+            topic
+        )
 
         print(
             f"\nResearch project created: {project_id}"
         )
 
-        # -----------------------------------------------------
+        # =====================================================
         # STEP 1: PRIMARY RESEARCH
-        # -----------------------------------------------------
+        # =====================================================
 
         print(
             "\n[1/5] Primary researcher working..."
@@ -274,7 +453,10 @@ Rules:
             "running",
         )
 
-        # Record primary researcher execution
+        # -----------------------------------------------------
+        # Create primary agent run
+        # -----------------------------------------------------
+
         research_run_id = self.repository.create_agent_run(
             project_id=project_id,
             agent_name="PrimaryResearcher",
@@ -299,17 +481,28 @@ Collect:
 - useful evidence
 
 Keep the research concise and structured.
+
+Clearly distinguish:
+- verified facts
+- vendor/company claims
+- uncertain information
 """,
                 use_web=True,
             )
 
-            # Save successful agent run
+            # -------------------------------------------------
+            # Save successful primary agent run
+            # -------------------------------------------------
+
             self.repository.complete_agent_run(
                 research_run_id,
                 research,
             )
 
-            # Mark research task completed
+            # -------------------------------------------------
+            # Complete primary task
+            # -------------------------------------------------
+
             self.repository.update_task(
                 primary_task_id,
                 "completed",
@@ -318,20 +511,21 @@ Keep the research concise and structured.
 
         except Exception as error:
 
-            # Save failed agent run
+            # -------------------------------------------------
+            # Save failure
+            # -------------------------------------------------
+
             self.repository.fail_agent_run(
                 research_run_id,
                 error,
             )
 
-            # Mark task failed
             self.repository.update_task(
                 primary_task_id,
                 "failed",
                 str(error),
             )
 
-            # Mark project failed
             self.repository.update_project_status(
                 project_id,
                 "failed",
@@ -339,16 +533,22 @@ Keep the research concise and structured.
 
             raise
 
-        # -----------------------------------------------------
+        # =====================================================
         # STEP 2: PARALLEL SPECIALIST AGENTS
-        # -----------------------------------------------------
+        # =====================================================
 
         print(
             "[2/5] Parallel specialist agents working..."
         )
 
         tasks = [
-            """
+
+            {
+                "task_type": "technical_analysis",
+
+                "agent_name": "TechnicalSpecialist",
+
+                "assignment": """
 Analyze this research from a technical/software engineering
 perspective.
 
@@ -358,9 +558,17 @@ Identify:
 - tools
 - architectures
 - technical developments
+- implementation approaches
+- important engineering implications
 """,
+            },
 
-            """
+            {
+                "task_type": "market_analysis",
+
+                "agent_name": "MarketSpecialist",
+
+                "assignment": """
 Analyze this research from a market and industry perspective.
 
 Identify:
@@ -369,9 +577,17 @@ Identify:
 - products
 - adoption trends
 - industry impact
+- important market developments
+- vendor claims that need verification
 """,
+            },
 
-            """
+            {
+                "task_type": "fact_checking",
+
+                "agent_name": "FactChecker",
+
+                "assignment": """
 Analyze this research as a skeptical fact-checker.
 
 Identify:
@@ -380,17 +596,49 @@ Identify:
 - possible inconsistencies
 - weak evidence
 - unsupported conclusions
+- statistics that need verification
+- claims that appear to come only from vendors
 """,
+            },
         ]
 
         specialist_results = await self.run_parallel_agents(
+            project_id,
             research,
             tasks,
         )
 
-        # -----------------------------------------------------
+        # =====================================================
+        # CHECK SPECIALIST RESULTS
+        # =====================================================
+
+        successful_specialists = [
+            result
+            for result in specialist_results
+            if result.get("status") == "completed"
+        ]
+
+        failed_specialists = [
+            result
+            for result in specialist_results
+            if result.get("status") == "failed"
+        ]
+
+        print(
+            f"    Specialists completed: "
+            f"{len(successful_specialists)}/{len(tasks)}"
+        )
+
+        if failed_specialists:
+
+            print(
+                f"    Specialist failures: "
+                f"{len(failed_specialists)}"
+            )
+
+        # =====================================================
         # STEP 3: CREATE INITIAL DRAFT
-        # -----------------------------------------------------
+        # =====================================================
 
         print(
             "[3/5] Writer creating draft..."
@@ -408,13 +656,15 @@ Identify:
             version=1,
         )
 
-        # -----------------------------------------------------
+        # =====================================================
         # STEP 4: QUALITY GATE
-        # -----------------------------------------------------
+        # =====================================================
 
         max_revisions = 2
 
-        for attempt in range(max_revisions + 1):
+        for attempt in range(
+            max_revisions + 1
+        ):
 
             print(
                 f"[4/5] Quality review "
@@ -426,8 +676,14 @@ Identify:
                 draft,
             )
 
-            # Safely extract status
-            if isinstance(review, dict):
+            # -------------------------------------------------
+            # Extract review status
+            # -------------------------------------------------
+
+            if isinstance(
+                review,
+                dict,
+            ):
 
                 status = review.get(
                     "status",
@@ -447,10 +703,13 @@ Identify:
             )
 
             # -------------------------------------------------
-            # SAVE REVIEW
+            # Extract review information
             # -------------------------------------------------
 
-            if isinstance(review, dict):
+            if isinstance(
+                review,
+                dict,
+            ):
 
                 critical_flaws = review.get(
                     "critical_flaws",
@@ -468,7 +727,13 @@ Identify:
                     "Reviewer returned invalid data."
                 ]
 
-                revision_notes = str(review)
+                revision_notes = str(
+                    review
+                )
+
+            # -------------------------------------------------
+            # Save review
+            # -------------------------------------------------
 
             self.repository.create_review(
                 project_id=project_id,
@@ -482,9 +747,9 @@ Identify:
                 ),
             )
 
-            # -------------------------------------------------
+            # =================================================
             # PASS
-            # -------------------------------------------------
+            # =================================================
 
             if status == "PASS":
 
@@ -499,9 +764,9 @@ Identify:
 
                 return draft
 
-            # -------------------------------------------------
+            # =================================================
             # MAXIMUM REVISIONS
-            # -------------------------------------------------
+            # =================================================
 
             if attempt == max_revisions:
 
@@ -516,9 +781,9 @@ Identify:
 
                 return draft
 
-            # -------------------------------------------------
+            # =================================================
             # REVISION
-            # -------------------------------------------------
+            # =================================================
 
             print(
                 f"    Revising draft "
@@ -531,7 +796,10 @@ Identify:
                 review,
             )
 
+            # -------------------------------------------------
             # Save revised draft
+            # -------------------------------------------------
+
             draft_id = self.repository.create_draft(
                 project_id=project_id,
                 content=draft,
