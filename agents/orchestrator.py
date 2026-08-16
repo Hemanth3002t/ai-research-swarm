@@ -1,10 +1,15 @@
 import asyncio
 
 from agents.agent import ResearchAgent
+from database.repository import ResearchRepository
 
 
 class ResearchSwarm:
+
     def __init__(self):
+
+        # Database repository
+        self.repository = ResearchRepository()
 
         # Primary researcher
         self.researcher = ResearchAgent(
@@ -29,6 +34,10 @@ class ResearchSwarm:
             model="llama-3.1-8b-instant",
             max_completion_tokens=350,
         )
+
+    # =========================================================
+    # PARALLEL SPECIALIST AGENTS
+    # =========================================================
 
     async def run_parallel_agents(self, research, tasks):
 
@@ -62,6 +71,10 @@ Return concise findings in bullet points.
         )
 
         return results
+
+    # =========================================================
+    # CREATE DRAFT
+    # =========================================================
 
     def create_draft(self, research, specialist_results):
 
@@ -97,6 +110,10 @@ Requirements:
         )
 
         return draft
+
+    # =========================================================
+    # REVIEW DRAFT
+    # =========================================================
 
     def review_draft(self, research, draft):
 
@@ -168,10 +185,14 @@ Be extremely strict.
 
         return review
 
+    # =========================================================
+    # REVISE DRAFT
+    # =========================================================
+
     def revise_draft(self, research, draft, review):
 
-        # Convert review into readable text for the writer.
         if isinstance(review, dict):
+
             review_text = (
                 f"Status: {review.get('status', 'FAIL')}\n"
                 f"Critical flaws: "
@@ -179,7 +200,9 @@ Be extremely strict.
                 f"Revision notes: "
                 f"{review.get('revision_notes', '')}"
             )
+
         else:
+
             review_text = str(review)
 
         revised = self.writer.run(
@@ -215,16 +238,54 @@ Rules:
 
         return revised
 
+    # =========================================================
+    # MAIN SWARM
+    # =========================================================
+
     async def run(self, topic):
 
-        print("\n[1/5] Primary researcher working...")
+        # -----------------------------------------------------
+        # CREATE PROJECT
+        # -----------------------------------------------------
 
-        # ---------------------------------------------------------
-        # STEP 1: PRIMARY WEB RESEARCH
-        # ---------------------------------------------------------
+        project_id = self.repository.create_project(topic)
 
-        research = self.researcher.run(
-            f"""
+        print(
+            f"\nResearch project created: {project_id}"
+        )
+
+        # -----------------------------------------------------
+        # STEP 1: PRIMARY RESEARCH
+        # -----------------------------------------------------
+
+        print(
+            "\n[1/5] Primary researcher working..."
+        )
+
+        primary_task_id = self.repository.create_task(
+            project_id=project_id,
+            task_type="primary_research",
+            description=topic,
+            assigned_agent="PrimaryResearcher",
+        )
+
+        self.repository.update_task(
+            primary_task_id,
+            "running",
+        )
+
+        # Record primary researcher execution
+        research_run_id = self.repository.create_agent_run(
+            project_id=project_id,
+            agent_name="PrimaryResearcher",
+            task=topic,
+            model="openai/gpt-oss-20b",
+        )
+
+        try:
+
+            research = self.researcher.run(
+                f"""
 Research the following topic using current web sources:
 
 {topic}
@@ -239,14 +300,52 @@ Collect:
 
 Keep the research concise and structured.
 """,
-            use_web=True,
-        )
+                use_web=True,
+            )
 
-        print("[2/5] Parallel specialist agents working...")
+            # Save successful agent run
+            self.repository.complete_agent_run(
+                research_run_id,
+                research,
+            )
 
-        # ---------------------------------------------------------
+            # Mark research task completed
+            self.repository.update_task(
+                primary_task_id,
+                "completed",
+                research,
+            )
+
+        except Exception as error:
+
+            # Save failed agent run
+            self.repository.fail_agent_run(
+                research_run_id,
+                error,
+            )
+
+            # Mark task failed
+            self.repository.update_task(
+                primary_task_id,
+                "failed",
+                str(error),
+            )
+
+            # Mark project failed
+            self.repository.update_project_status(
+                project_id,
+                "failed",
+            )
+
+            raise
+
+        # -----------------------------------------------------
         # STEP 2: PARALLEL SPECIALIST AGENTS
-        # ---------------------------------------------------------
+        # -----------------------------------------------------
+
+        print(
+            "[2/5] Parallel specialist agents working..."
+        )
 
         tasks = [
             """
@@ -289,20 +388,29 @@ Identify:
             tasks,
         )
 
-        print("[3/5] Writer creating draft...")
-
-        # ---------------------------------------------------------
+        # -----------------------------------------------------
         # STEP 3: CREATE INITIAL DRAFT
-        # ---------------------------------------------------------
+        # -----------------------------------------------------
+
+        print(
+            "[3/5] Writer creating draft..."
+        )
 
         draft = self.create_draft(
             research,
             specialist_results,
         )
 
-        # ---------------------------------------------------------
+        # Save initial draft
+        draft_id = self.repository.create_draft(
+            project_id=project_id,
+            content=draft,
+            version=1,
+        )
+
+        # -----------------------------------------------------
         # STEP 4: QUALITY GATE
-        # ---------------------------------------------------------
+        # -----------------------------------------------------
 
         max_revisions = 2
 
@@ -320,22 +428,70 @@ Identify:
 
             # Safely extract status
             if isinstance(review, dict):
-                status = review.get("status", "FAIL")
+
+                status = review.get(
+                    "status",
+                    "FAIL",
+                )
+
             else:
+
                 status = "FAIL"
 
-            # Normalize status
-            status = str(status).upper().strip()
+            status = str(
+                status
+            ).upper().strip()
 
             print(
                 f"    Review result: {status}"
             )
 
-            # -----------------------------------------------------
+            # -------------------------------------------------
+            # SAVE REVIEW
+            # -------------------------------------------------
+
+            if isinstance(review, dict):
+
+                critical_flaws = review.get(
+                    "critical_flaws",
+                    [],
+                )
+
+                revision_notes = review.get(
+                    "revision_notes",
+                    "",
+                )
+
+            else:
+
+                critical_flaws = [
+                    "Reviewer returned invalid data."
+                ]
+
+                revision_notes = str(review)
+
+            self.repository.create_review(
+                project_id=project_id,
+                draft_id=draft_id,
+                status=status,
+                critical_flaws=str(
+                    critical_flaws
+                ),
+                revision_notes=str(
+                    revision_notes
+                ),
+            )
+
+            # -------------------------------------------------
             # PASS
-            # -----------------------------------------------------
+            # -------------------------------------------------
 
             if status == "PASS":
+
+                self.repository.update_project_status(
+                    project_id,
+                    "completed",
+                )
 
                 print(
                     "[5/5] Quality gate passed."
@@ -343,11 +499,16 @@ Identify:
 
                 return draft
 
-            # -----------------------------------------------------
-            # MAXIMUM REVISIONS REACHED
-            # -----------------------------------------------------
+            # -------------------------------------------------
+            # MAXIMUM REVISIONS
+            # -------------------------------------------------
 
             if attempt == max_revisions:
+
+                self.repository.update_project_status(
+                    project_id,
+                    "completed_with_warnings",
+                )
 
                 print(
                     "[5/5] Maximum revisions reached."
@@ -355,9 +516,9 @@ Identify:
 
                 return draft
 
-            # -----------------------------------------------------
-            # FAIL → REVISION
-            # -----------------------------------------------------
+            # -------------------------------------------------
+            # REVISION
+            # -------------------------------------------------
 
             print(
                 f"    Revising draft "
@@ -368,6 +529,13 @@ Identify:
                 research,
                 draft,
                 review,
+            )
+
+            # Save revised draft
+            draft_id = self.repository.create_draft(
+                project_id=project_id,
+                content=draft,
+                version=attempt + 2,
             )
 
         return draft
