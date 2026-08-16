@@ -1,16 +1,22 @@
-from agents.agent import ResearchAgent
+import asyncio
 
-def main():
-    agent = ResearchAgent()
+from agents.orchestrator import ResearchSwarm
 
-    result = agent.run(
-        "Explain the major applications of artificial intelligence "
-        "in software testing."
+
+async def main():
+    swarm = ResearchSwarm()
+
+    result = await swarm.run(
+        "The current state of AI-powered software testing in 2026"
     )
 
-    print("\n===== RESEARCH AGENT =====\n")
+    print("\n")
+    print("=" * 70)
+    print("FINAL RESEARCH REPORT")
+    print("=" * 70)
+    print("\n")
     print(result)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
