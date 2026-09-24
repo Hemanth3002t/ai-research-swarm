@@ -341,18 +341,53 @@ Rules:
 
             except Exception as first_error:
 
+                error_text = str(first_error)
+
                 print(
-                     f"    {agent_name} failed: "
-                     f"{type(first_error).__name__}: {first_error}"
-                      )
-                print(
-                     f"    {agent_name} failed. "
-                     f"Retrying once..."
-                     )
+                    f"    {agent_name} failed: "
+                    f"{type(first_error).__name__}: {error_text}"
+                )
+
+                # -------------------------------------------------
+                # Rate-limit aware retry
+                # -------------------------------------------------
+
+                retry_delay = 3
+
+                if (
+                    "rate_limit" in error_text.lower()
+                    or "429" in error_text
+                ):
+                    match = re.search(
+                        r"try again in\s+([0-9.]+)s",
+                        error_text,
+                        re.IGNORECASE,
+                    )
+
+                    if match:
+                        retry_delay = float(match.group(1)) + 1
+
+                    retry_delay = min(
+                        max(retry_delay, 3),
+                        30,
+                    )
+
+                    print(
+                        f"    Rate limit detected. "
+                        f"Waiting {retry_delay:.1f}s before retry..."
+                    )
+                else:
+                    print(
+                        f"    Retrying {agent_name} in "
+                        f"{retry_delay}s..."
+                    )
+
+                await asyncio.sleep(retry_delay)
+
+                print(f"    Retrying {agent_name}...")
 
                 # Retry with a smaller prompt.
                 try:
-
                     retry_prompt = f"""
 Analyze the research below.
 
