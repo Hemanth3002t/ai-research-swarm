@@ -438,13 +438,15 @@ Do not invent facts.
                     )
 
                     error_text = (
-                        f"Initial error: {first_error}\n"
-                        f"Retry error: {second_error}"
+                        f"Initial error: "
+                        f"{type(first_error).__name__}: {first_error}\n"
+                        f"Retry error: "
+                        f"{type(second_error).__name__}: {second_error}"
                     )
 
                     self.repository.fail_agent_run(
                         run_id,
-                        second_error,
+                        Exception(error_text),
                     )
 
                     self.repository.update_task(
