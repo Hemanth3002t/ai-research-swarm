@@ -51,6 +51,86 @@ class ResearchRepository:
             connection.close()
 
     # =========================================================
+    # READ DRAFTS
+    # =========================================================
+
+    def get_project_drafts(self, project_id):
+        connection = get_connection()
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        version,
+                        content,
+                        created_at
+                    FROM drafts
+                    WHERE project_id = %s
+                    ORDER BY version
+                    """,
+                    (project_id,),
+                )
+
+                rows = cursor.fetchall()
+
+                return [
+                    {
+                        "id": row[0],
+                        "version": row[1],
+                        "content": row[2],
+                        "created_at": row[3],
+                    }
+                    for row in rows
+                ]
+
+        finally:
+            connection.close()
+
+    # =========================================================
+    # READ REVIEWS
+    # =========================================================
+
+    def get_project_reviews(self, project_id):
+        connection = get_connection()
+
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT
+                        id,
+                        draft_id,
+                        status,
+                        critical_flaws,
+                        revision_notes,
+                        created_at
+                    FROM reviews
+                    WHERE project_id = %s
+                    ORDER BY id
+                    """,
+                    (project_id,),
+                )
+
+                rows = cursor.fetchall()
+
+                return [
+                    {
+                        "id": row[0],
+                        "draft_id": row[1],
+                        "status": row[2],
+                        "critical_flaws": row[3],
+                        "revision_notes": row[4],
+                        "created_at": row[5],
+                    }
+                    for row in rows
+                ]
+
+        finally:
+            connection.close()
+
+    # =========================================================
     # RESEARCH TASKS
     # =========================================================
 
